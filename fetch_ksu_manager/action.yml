@@ -1,0 +1,159 @@
+name: 'Fetch KSU Manager'
+description: "Downloads KSU (or its fork) manager APK (normal + spoofed) built by a KSU (or its fork) repo's CI for a given commit, and stages them into a dist dir with type-prefixed names"
+
+inputs:
+  ksu-type:
+    description: "KSU variant to fetch (currently supported: 'ksu' & 'ksun')"
+    required: true
+  dist-dir:
+    description: 'Directory to place the renamed APKs into'
+    required: true
+  commit-hash:
+    description: 'Full commit SHA on the KSU manager repo to pull the built manager from'
+    required: true
+  github-token:
+    description: 'Token with Actions read access to the target repo (defaults to the calling workflow token)'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve KSU repo
+      id: resolve
+      shell: bash
+      run: |
+        # Extracted this from kali's default colorscheme
+        red="\033[38;2;236;1;1m"
+        blue="\033[38;2;39;127;255m"
+        green="\e[38;2;71;212;185m"
+        yellow="\e[38;2;254;164;76m"
+        end="\e[0m"
+        _name="[${yellow}fetch_ksu_manager${end}]"
+
+        case "${{ inputs.ksu-type }}" in
+          ksu)
+            echo "repo=tiann/KernelSU" >> "$GITHUB_OUTPUT"
+            echo "workflow=Build Manager" >> "$GITHUB_OUTPUT"
+            echo -e "${_name} [${blue}log${end}] ${green}repo is set to: ${blue}tiann/KernelSU${end}"
+            ;;
+          ksun)
+            echo "repo=KernelSU-Next/KernelSU-Next" >> "${GITHUB_OUTPUT}"
+            echo "workflow=Build Manager CI" >> "$GITHUB_OUTPUT"
+            echo -e "${_name} [${blue}log${end}] ${green}repo is set to: ${blue}KernelSU-Next/KernelSU-Next${end}"
+            ;;
+          *)
+            echo -e "${_name} [${blue}error${end}] ${red}input ksu-type '${{ inputs.ksu-type }}' is not supported at the moment${end}"
+            exit 1
+            ;;
+        esac
+
+    - name: Find manager run
+      id: find-run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        # Cant think of any better impl atm so just ctrl c+ ctrl v to every step to prettify output
+        # Using github outputs will increase the variable name (steps.resolve.ouputs.foo)
+        # Extracted this from kali's default colorscheme
+        red="\033[38;2;236;1;1m"
+        blue="\033[38;2;39;127;255m"
+        green="\e[38;2;71;212;185m"
+        yellow="\e[38;2;254;164;76m"
+        end="\e[0m"
+        _name="[${yellow}fetch_ksu_manager${end}]"
+
+        REPO="${{ steps.resolve.outputs.repo }}"
+        WORKFLOW="${{ steps.resolve.outputs.workflow }}"
+        SHA="${{ inputs.commit-hash }}"
+
+        RUN_ID=$(gh run list \
+          --repo "${REPO}" \
+          --commit "${SHA}" \
+          --workflow "${WORKFLOW}" \
+          --json databaseId,status \
+          --jq '[.[] | select(.status == "completed")][0].databaseId')
+
+        if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" == "null" ]; then
+          echo -e "${_name} [${blue}error${end}] ${red}no completed '${WORKFLOW}' run found for commit ${green}${SHA} ${red}on ${green}${REPO}${end}"
+          exit 1
+        fi
+
+        echo -e "${_name} [${blue}log${end}] ${green} Resolved run: ${blue}${RUN_ID}${end}"
+        echo "run-id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+    - name: Download manager artifacts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        # Extracted this from kali's default colorscheme
+        red="\033[38;2;236;1;1m"
+        blue="\033[38;2;39;127;255m"
+        green="\e[38;2;71;212;185m"
+        yellow="\e[38;2;254;164;76m"
+        end="\e[0m"
+        _name="[${yellow}fetch_ksu_manager${end}]"
+
+        REPO="${{ steps.resolve.outputs.repo }}"
+        RUN_ID="${{ steps.find-run.outputs.run-id }}"
+
+        rm -rf /tmp/_ksu_manager_dl
+        mkdir -p /tmp/_ksu_manager_dl
+
+        echo -e "${_name} [${blue}log${end}] ${green}fetching manager artifacts${end}"
+        gh run download "${RUN_ID}" --repo "${REPO}" --pattern "manager*" -D /tmp/_ksu_manager_dl
+
+    - name: Rename and stage into dist dir
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Extracted this from kali's default colorscheme
+        red="\033[38;2;236;1;1m"
+        blue="\033[38;2;39;127;255m"
+        green="\e[38;2;71;212;185m"
+        yellow="\e[38;2;254;164;76m"
+        end="\e[0m"
+        _name="[${yellow}fetch_ksu_manager${end}]"
+
+        DIST="${{ inputs.dist-dir }}"
+        TYPE="${{ inputs.ksu-type }}"
+        mkdir -p "${DIST}"
+
+        staged=0
+
+        for dir in /tmp/_ksu_manager_dl/*/; do
+          [ -d "${dir}" ] || continue
+
+          artifact_name="$(basename "${dir}")"
+          suffix="${artifact_name#manager}"   # "manager-spoofed" -> "-spoofed", "manager" -> ""
+          suffix="${suffix#-}"                # "-spoofed" -> "spoofed"
+
+          apk=$(find "${dir}" -maxdepth 1 -name '*.apk' | head -n1)
+          if [ -z "$apk" ]; then
+            echo -e "${_name} [${blue}warning${end}] ${yellow}no APK found in artifact '${artifact_name}', skipping${end}"
+            continue
+          fi
+
+          if [ -z "$suffix" ]; then
+            out="${DIST}/${TYPE}.apk"
+          else
+            out="${DIST}/${TYPE}_${suffix}.apk"
+          fi
+
+          cp "${apk}" "${out}"
+          echo -e "${_name} [${blue}log${end}] ${green}staged: ${out} (from artifact '${artifact_name}')${end}"
+          staged=$((staged + 1))
+        done
+
+        if [ "${staged}" -eq 0 ]; then
+          echo -e "${_name} [${blue}error${end}] ${red}no manager APKs were staged — check that 'manager*' artifacts exist for this run${end}"
+          exit 1
+        fi
+
+        rm -rf /tmp/_ksu_manager_dl
