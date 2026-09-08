@@ -3,7 +3,7 @@ description: "Downloads KSU (or its fork) manager APK (normal + spoofed) built b
 
 inputs:
   ksu-type:
-    description: "KSU variant to fetch (currently supported: 'ksu' & 'ksun')"
+    description: "KSU variant to fetch (currently supported: 'ksu', 'ksun', 'kowsu' & 'rksu' )"
     required: true
   dist-dir:
     description: 'Directory to place the renamed APKs into'
@@ -32,17 +32,27 @@ runs:
 
         case "${{ inputs.ksu-type }}" in
           ksu)
-            echo "repo=tiann/KernelSU" >> "$GITHUB_OUTPUT"
-            echo "workflow=Build Manager" >> "$GITHUB_OUTPUT"
-            echo -e "${_name} [${blue}log${end}] ${green}repo is set to: ${blue}tiann/KernelSU${end}"
+            echo "repo=tiann/KernelSU" >> "${GITHUB_OUTPUT}"
+            echo "workflow=Build Manager" >> "${GITHUB_OUTPUT}"
+            echo -e "${_name} [${blue}log${end}] repo is set to: ${green}tiann/KernelSU${end}"
             ;;
           ksun)
             echo "repo=KernelSU-Next/KernelSU-Next" >> "${GITHUB_OUTPUT}"
-            echo "workflow=Build Manager CI" >> "$GITHUB_OUTPUT"
-            echo -e "${_name} [${blue}log${end}] ${green}repo is set to: ${blue}KernelSU-Next/KernelSU-Next${end}"
+            echo "workflow=Build Manager CI" >> "${GITHUB_OUTPUT}"
+            echo -e "${_name} [${blue}log${end}] repo is set to: ${green}KernelSU-Next/KernelSU-Next${end}"
+            ;;
+          kowsu)
+            echo "repo=KOWX712/KernelSU" >> "${GITHUB_OUTPUT}"
+            echo "workflow=Build Manager" >> "${GITHUB_OUTPUT}"
+            echo -e "${_name} [${blue}log${end}] repo is set to: ${green}KOWX712/KernelSU${end}"
+            ;;
+          rksu)
+            echo "repo=ReSukiSU/ReSukiSU" >> "${GITHUB_OUTPUT}"
+            echo "workflow=Build Manager" >> "${GITHUB_OUTPUT}"
+            echo -e "${_name} [${blue}log${end}] repo is set to: ${green}ReSukiSU/ReSukiSU/${end}"
             ;;
           *)
-            echo -e "${_name} [${blue}error${end}] ${red}input ksu-type '${{ inputs.ksu-type }}' is not supported at the moment${end}"
+            echo -e "${_name} [${red}error${end}] input ksu-type ${red}'${{ inputs.ksu-type }}'${end} is not supported at the moment"
             exit 1
             ;;
         esac
@@ -77,11 +87,11 @@ runs:
           --jq '[.[] | select(.status == "completed")][0].databaseId')
 
         if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" == "null" ]; then
-          echo -e "${_name} [${blue}error${end}] ${red}no completed '${WORKFLOW}' run found for commit ${green}${SHA} ${red}on ${green}${REPO}${end}"
-          exit 1
+          echo -e "${_name} [${red}error${end}] no completed ${blue}'${WORKFLOW}'${end} run found for commit ${red}${SHA}${end} on ${red}${REPO}${end}"
+          # Dont exit just warn the user
         fi
 
-        echo -e "${_name} [${blue}log${end}] ${green} Resolved run: ${blue}${RUN_ID}${end}"
+        echo -e "${_name} [${blue}log${end}] Resolved run: ${green}${RUN_ID}${end}"
         echo "run-id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
 
     - name: Download manager artifacts
@@ -105,7 +115,7 @@ runs:
         rm -rf /tmp/_ksu_manager_dl
         mkdir -p /tmp/_ksu_manager_dl
 
-        echo -e "${_name} [${blue}log${end}] ${green}fetching manager artifacts${end}"
+        echo -e "${_name} [${blue}log${end}] fetching manager artifacts"
         gh run download "${RUN_ID}" --repo "${REPO}" --pattern "manager*" -D /tmp/_ksu_manager_dl
 
     - name: Rename and stage into dist dir
@@ -131,29 +141,51 @@ runs:
           [ -d "${dir}" ] || continue
 
           artifact_name="$(basename "${dir}")"
-          suffix="${artifact_name#manager}"   # "manager-spoofed" -> "-spoofed", "manager" -> ""
-          suffix="${suffix#-}"                # "-spoofed" -> "spoofed"
+
+          # NOTE: Derive the suffix from a COPY, never mutate artifact_name itself —
+          # it's still needed below for log/warning messages.
+
+          # must support these variants as of now:
+          # manager -> ''
+          # manager-spoofed -> '_spoofed'
+          # manager-gradle -> '_gradle'
+          # Manager-Debug -> '_debug'
+          # Manager-Release -> '_release'
+          # Spoofed-Manager-Release -> '_spoofed_release'
+          suffix_raw="$(echo "${artifact_name}" | tr '[:upper:]' '[:lower:]')" # lowercase, coz of rksu
+          suffix_raw="${suffix_raw//manager/}"    # strip "manager" prefix only (not any occurrence)
+          suffix_raw="${suffix_raw//-/_}"       # replace all (-) with (_)
+          suffix_raw="${suffix_raw#_}"          # drop a leading (_) left over from the dash swap above, so we don't double it up when prefixing below
+          suffix_raw="${suffix_raw//__/_}"      # collapse any remaining (__) into (_), (for rksu)
+ 
+          if [[ -z "${suffix_raw}" ]]; then
+            suffix=""
+          else
+            # single underscore separator for every variant, dash-based (ksun/ksu/kowsu)
+            # or dashless (rksu)
+            suffix="_${suffix_raw}"
+          fi
 
           apk=$(find "${dir}" -maxdepth 1 -name '*.apk' | head -n1)
-          if [ -z "$apk" ]; then
-            echo -e "${_name} [${blue}warning${end}] ${yellow}no APK found in artifact '${artifact_name}', skipping${end}"
+          if [ -z "${apk}" ]; then
+            echo -e "${_name} [${yellow}warning${end}] no APK found in artifact ${yellow}'${artifact_name}'${end}, skipping"
             continue
           fi
 
-          if [ -z "$suffix" ]; then
+          if [ -z "${suffix}" ]; then
             out="${DIST}/${TYPE}.apk"
           else
-            out="${DIST}/${TYPE}_${suffix}.apk"
+            out="${DIST}/${TYPE}${suffix}.apk"
           fi
 
           cp "${apk}" "${out}"
-          echo -e "${_name} [${blue}log${end}] ${green}staged: ${out} (from artifact '${artifact_name}')${end}"
+          echo -e "${_name} [${blue}log${end}] staged: ${green}${out}${end} (from artifact ${green}'${artifact_name}'${end})"
           staged=$((staged + 1))
         done
 
         if [ "${staged}" -eq 0 ]; then
-          echo -e "${_name} [${blue}error${end}] ${red}no manager APKs were staged — check that 'manager*' artifacts exist for this run${end}"
-          exit 1
+          echo -e "${_name} [${red}error${end}] no manager APKs were staged — check that ${red}'manager*'${end} artifacts exist for this run"
+          # Dont exit just warn the user
         fi
 
         rm -rf /tmp/_ksu_manager_dl
